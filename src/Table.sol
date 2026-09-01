@@ -34,11 +34,7 @@ contract Table {
         buyInAmount = buyInAmount_;
     }
 
-    function seatOf(address player)
-        public
-        view
-        returns (uint256 seat, bool seated)
-    {
+    function seatOf(address player) public view returns (uint256 seat, bool seated) {
         for (uint256 i; i < SEAT_COUNT; ++i) {
             if (seats[i] == player) return (i, true);
         }

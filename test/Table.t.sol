@@ -87,11 +87,7 @@ contract TableTest is Test {
                 try table.cashOut() {} catch {}
             }
 
-            assertEq(
-                chip.balanceOf(address(table)),
-                table.totalAccounted(),
-                "books do not balance"
-            );
+            assertEq(chip.balanceOf(address(table)), table.totalAccounted(), "books do not balance");
         }
     }
 }
