@@ -3,11 +3,14 @@ pragma solidity ^0.8.24;
 
 import {VRFConsumerBaseV2Plus} from "@chainlink/contracts/src/v0.8/vrf/dev/VRFConsumerBaseV2Plus.sol";
 import {VRFV2PlusClient} from "@chainlink/contracts/src/v0.8/vrf/dev/libraries/VRFV2PlusClient.sol";
+import {IDeckSource} from "./IDeckSource.sol";
 
 /// @title Shuffler
 /// @notice One random word in, one shuffled deck out. Knows no poker.
-contract Shuffler is VRFConsumerBaseV2Plus {
-    // The async gap made explicit. Nothing else in this contract
+contract Shuffler is
+    VRFConsumerBaseV2Plus,
+    IDeckSource // The async gap made explicit. Nothing else in this contract
+{
     // matters as much as the fact that this enum has to exist.
     enum Status {
         Idle,
@@ -84,5 +87,13 @@ contract Shuffler is VRFConsumerBaseV2Plus {
 
     function fullDeck() external view returns (uint8[52] memory) {
         return deck;
+    }
+
+    function isReady(uint256 requestId_) external view returns (bool) {
+        return status == Status.Ready && requestId_ == requestId;
+    }
+
+    function cardAt(uint256 index) external view returns (uint8) {
+        return deck[index];
     }
 }
