@@ -5,11 +5,13 @@ import {Test, console2 as console} from "forge-std/Test.sol";
 import {Table} from "../src/Table.sol";
 import {MockChip} from "./mocks/MockChip.sol";
 import {MockDeck} from "./mocks/MockDeck.sol";
+import {PassiveVault} from "../src/PassiveVault.sol";
 
 contract DemoTest is Test {
     Table table;
     MockChip chip;
     MockDeck deck;
+    PassiveVault vault;
 
     address alice = makeAddr("alice");
     address bob = makeAddr("bob");
@@ -21,7 +23,8 @@ contract DemoTest is Test {
     function setUp() public {
         chip = new MockChip();
         deck = new MockDeck();
-        table = new Table(chip, deck, BUY_IN, ANTE, BET);
+        vault = new PassiveVault(chip);
+        table = new Table(chip, deck, vault, BUY_IN, ANTE, BET);
 
         address[2] memory players = [alice, bob];
         for (uint256 i; i < 2; ++i) {

@@ -1,21 +1,20 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-/// @title IYieldStrategy
-/// @notice Phase 6. Not wired into Table yet — this file exists so the
-/// shape is settled before there's a working game to refactor around.
-///
-/// Accounting rule this must never break: stacks are denominated in
-/// chips, never in strategy shares. A stack worth N shares drifts in
-/// value mid-hand, so a pot is worth something different when it's won
-/// than when it was built. Yield accrues as a separate pool on top.
-///
-/// The invariant becomes:
-///   idleBalance + strategy.totalAssets() >= totalAccounted()
-/// and harvest() may only ever skim the surplus above that line.
+/// @notice Somewhere the table can park chips that isn't the table.
+/// @dev Deliberately dumb. It does not know about players, pots, hands or
+/// prizes — it takes assets, returns assets, and reports a total. Anything
+/// smarter belongs on the table's side of this boundary.
 interface IYieldStrategy {
+    function asset() external view returns (address);
+
+    /// @dev Pulls `amount` from msg.sender. Caller must approve first.
     function deposit(uint256 amount) external;
+
+    /// @dev Returns `amount` to msg.sender.
     function withdraw(uint256 amount) external;
+
+    /// @dev What this strategy currently holds, valued in the asset.
+    /// The table trusts this number completely.
     function totalAssets() external view returns (uint256);
-    function harvest() external returns (uint256 surplus);
 }
