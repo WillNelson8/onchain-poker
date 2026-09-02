@@ -33,6 +33,16 @@ contract DemoTest is Test {
         }
     }
 
+    function show(string memory label) internal view {
+        console.log("");
+        console.log(label);
+        console.log("  alice stack  :", table.stack(alice) / 1e18);
+        console.log("  bob stack    :", table.stack(bob) / 1e18);
+        console.log("  pot          :", table.pot() / 1e18);
+        console.log("  table holds  :", chip.balanceOf(address(table)) / 1e18);
+        console.log("  table owes   :", table.totalAccounted() / 1e18);
+    }
+
     function test_Demo() public {
         console.log("=== onchain-poker | phase 3 ===");
         show("Both seated");
@@ -40,7 +50,7 @@ contract DemoTest is Test {
         table.startHand();
         show("Antes posted, deck requested");
 
-        deck.setCards(12, 0); // ace of clubs vs deuce of clubs
+        deck.setCards(12, 0);
         deck.fulfil();
         table.deal();
         console.log("");

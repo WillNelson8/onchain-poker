@@ -122,31 +122,32 @@ contract TableTest is Test {
         vm.expectRevert(Table.NotYourTurn.selector);
         table.act(Table.Action.Check);
     }
-}
 
-function testFuzz_SolventThroughRandomHands(uint256 entropy) public {
-    for (uint256 hand; hand < 6; ++hand) {
-        uint256 roll = uint256(keccak256(abi.encode(entropy, hand)));
+    function testFuzz_SolventThroughRandomHands(uint256 entropy) public {
+        for (uint256 hand; hand < 6; ++hand) {
+            uint256 roll = uint256(keccak256(abi.encode(entropy, hand)));
 
-        try table.startHand() {}
-        catch {
-            break;
+            try table.startHand() {}
+            catch {
+                break;
+            }
+            deck.setCards(uint8(roll % 52), uint8((roll >> 8) % 52));
+            deck.fulfil();
+            table.deal();
+
+            // Up to 8 random actions; invalid ones just revert.
+            for (uint256 step; step < 8; ++step) {
+                uint256 pick = uint256(keccak256(abi.encode(roll, step)));
+                address who = (pick % 2 == 0) ? alice : bob;
+
+                vm.prank(who);
+                try table.act(Table.Action(uint8(pick >> 8) % 4)) {} catch {}
+
+                assertEq(chip.balanceOf(address(table)), table.totalAccounted(), "books do not balance");
+            }
         }
-        deck.setCards(uint8(roll % 52), uint8((roll >> 8) % 52));
-        deck.fulfil();
-        table.deal();
 
-        // Up to 8 random actions; invalid ones just revert.
-        for (uint256 step; step < 8; ++step) {
-            uint256 pick = uint256(keccak256(abi.encode(roll, step)));
-            address who = (pick % 2 == 0) ? alice : bob;
-
-            vm.prank(who);
-            try table.act(Table.Action(uint8(pick >> 8) % 4)) {} catch {}
-
-            assertEq(chip.balanceOf(address(table)), table.totalAccounted(), "books do not balance");
-        }
+        assertEq(chip.balanceOf(address(table)), table.totalAccounted());
     }
-
-    assertEq(chip.balanceOf(address(table)), table.totalAccounted());
 }
+
