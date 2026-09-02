@@ -18,10 +18,24 @@ contract TableTest is Test {
     uint256 constant ANTE = 2e18;
     uint256 constant BET = 5e18;
 
-    // 2 of clubs = 0, ace of clubs = 12, 2 of diamonds = 13
-    uint8 constant TWO_CLUBS = 0;
-    uint8 constant ACE_CLUBS = 12;
-    uint8 constant TWO_DIAMONDS = 13;
+    // Nine cards: [0,1] alice hole, [2,3] bob hole, [4..8] board.
+    // alice Ac Ad | bob 7c 7d | board Ah 2s 9c Kd 4h
+    // alice makes trip aces, bob a pair of sevens.
+    function _tripsVsPair() internal pure returns (uint8[9] memory n) {
+        n = [uint8(12), 25, 5, 18, 38, 39, 7, 24, 28];
+    }
+
+    // alice 2c 3c | bob 2d 3d | board Ac Kd Qh Js Tc
+    // Both play the board for a broadway straight. Dead tie.
+    function _tie() internal pure returns (uint8[9] memory n) {
+        n = [uint8(0), 1, 13, 14, 12, 24, 36, 48, 8];
+    }
+
+    // alice Ac Ad | bob 7h 3h | board Ah 9h 2h Kd 4c
+    // alice has trip aces, bob backs into a flush and wins.
+    function _flushBeatsTrips() internal pure returns (uint8[9] memory n) {
+        n = [uint8(12), 25, 31, 27, 38, 33, 26, 24, 2];
+    }
 
     function setUp() public {
         chip = new MockChip();
@@ -38,21 +52,142 @@ contract TableTest is Test {
         }
     }
 
+    function _dealHand(uint8[9] memory nine) internal {
+        table.startHand();
+        deck.setHand(nine);
+        deck.fulfil();
+        table.deal();
+    }
+
+    /// Whoever is to act checks, then whoever is to act next checks.
+    /// Works on any street without knowing who the button is.
+    function _bothCheck() internal {
+        vm.prank(table.seats(table.actor()));
+        table.act(Table.Action.Check);
+        vm.prank(table.seats(table.actor()));
+        table.act(Table.Action.Check);
+    }
+
+    function _checkToShowdown() internal {
+        _bothCheck(); // preflop
+        _bothCheck(); // flop
+        _bothCheck(); // turn
+        _bothCheck(); // river
+    }
+
+    // ---------------------------------------------------------------
+    // Hand lifecycle
+    // ---------------------------------------------------------------
+
+    function test_AwaitingDeck_CannotActYet() public {
+        table.startHand();
+        vm.prank(alice);
+        vm.expectRevert(Table.WrongPhase.selector);
+        table.act(Table.Action.Check);
+    }
+
+    function test_FourStreets_TripsBeatsPair() public {
+        _dealHand(_tripsVsPair());
+
+        assertEq(table.street(), 0, "preflop");
+        _bothCheck();
+        assertEq(table.street(), 1, "flop");
+        _bothCheck();
+        assertEq(table.street(), 2, "turn");
+        _bothCheck();
+        assertEq(table.street(), 3, "river");
+        _bothCheck();
+
+        assertEq(uint256(table.phase()), 0, "hand over");
+        assertEq(table.stack(alice), BUY_IN + ANTE, "trip aces wins");
+        assertEq(table.stack(bob), BUY_IN - ANTE);
+        assertEq(chip.balanceOf(address(table)), table.totalAccounted());
+    }
+
+    function test_Flush_BeatsTrips() public {
+        _dealHand(_flushBeatsTrips());
+        _checkToShowdown();
+
+        assertEq(table.stack(bob), BUY_IN + ANTE, "flush wins");
+        assertEq(table.stack(alice), BUY_IN - ANTE);
+    }
+
+    function test_Tie_SplitsPot() public {
+        _dealHand(_tie());
+        _checkToShowdown();
+
+        assertEq(table.stack(alice), BUY_IN);
+        assertEq(table.stack(bob), BUY_IN);
+    }
+
+    // ---------------------------------------------------------------
+    // Betting
+    // ---------------------------------------------------------------
+
+    function test_BetRaiseCall_AdvancesStreetOnlyAfterTheCall() public {
+        _dealHand(_tripsVsPair());
+
+        vm.prank(alice);
+        table.act(Table.Action.Bet);
+        vm.prank(bob);
+        table.act(Table.Action.Bet); // a raise
+
+        // Both have acted, but the bets are unequal. Still preflop.
+        assertEq(table.street(), 0, "still preflop");
+
+        vm.prank(alice);
+        table.act(Table.Action.Call);
+
+        assertEq(table.street(), 1, "flop");
+        assertEq(uint256(table.phase()), 2, "still betting");
+    }
+
+    function test_BetFold_BettorTakesPot() public {
+        _dealHand(_flushBeatsTrips()); // bob would have won at showdown
+
+        vm.prank(alice);
+        table.act(Table.Action.Bet);
+        vm.prank(bob);
+        table.act(Table.Action.Fold);
+
+        assertEq(table.stack(alice), BUY_IN + ANTE);
+        assertEq(table.stack(bob), BUY_IN - ANTE);
+        assertEq(uint256(table.phase()), 0);
+    }
+
+    function test_NotYourTurn() public {
+        _dealHand(_tripsVsPair());
+        vm.prank(bob); // button (seat 0) acts first preflop
+        vm.expectRevert(Table.NotYourTurn.selector);
+        table.act(Table.Action.Check);
+    }
+
+    function test_CannotCashOutMidHand() public {
+        _dealHand(_tripsVsPair());
+        vm.prank(bob);
+        vm.expectRevert(Table.WrongPhase.selector);
+        table.cashOut();
+    }
+
+    // ---------------------------------------------------------------
+    // Deadlines
+    // ---------------------------------------------------------------
+
     function test_ForceFold_RevertsBeforeDeadline() public {
-        _dealHand(ACE_CLUBS, TWO_CLUBS);
+        _dealHand(_tripsVsPair());
         vm.expectRevert(Table.DeadlineNotPassed.selector);
         table.forceFold();
     }
 
     function test_ForceFold_AfterDeadline() public {
-        _dealHand(TWO_CLUBS, ACE_CLUBS); // alice to act, bob holds the ace
+        _dealHand(_tripsVsPair()); // alice to act, and she goes quiet
 
         vm.warp(block.timestamp + 5 minutes + 1);
-        table.forceFold(); // note: no prank — anyone may call
+        table.forceFold(); // no prank: anyone may call
 
         assertEq(table.stack(bob), BUY_IN + ANTE);
         assertEq(table.stack(alice), BUY_IN - ANTE);
-        assertEq(uint256(table.phase()), 0, "back to Idle");
+        assertEq(uint256(table.phase()), 0);
     }
 
     function test_AbortHand_WhenDeckNeverArrives() public {
@@ -73,106 +208,46 @@ contract TableTest is Test {
         table.abortHand();
     }
 
-    // alice is seat 0, bob is seat 1, dealer starts at seat 0.
-    function _dealHand(uint8 card0, uint8 card1) internal {
-        table.startHand();
-        deck.setCards(card0, card1);
-        deck.fulfil();
-        table.deal();
-    }
-
-    function test_AwaitingDeck_CannotActYet() public {
-        table.startHand();
-        vm.prank(alice);
-        vm.expectRevert(Table.WrongPhase.selector);
-        table.act(Table.Action.Check);
-    }
-
-    function test_CheckCheck_HigherCardWins() public {
-        _dealHand(ACE_CLUBS, TWO_CLUBS); // alice ace, bob deuce
-
-        vm.prank(alice);
-        table.act(Table.Action.Check);
-        vm.prank(bob);
-        table.act(Table.Action.Check);
-
-        // Both anted 2, alice takes the 4 back plus bob's 2.
-        assertEq(table.stack(alice), BUY_IN + ANTE);
-        assertEq(table.stack(bob), BUY_IN - ANTE);
-        assertEq(uint256(table.phase()), 0, "back to Idle");
-    }
-
-    function test_BetFold_BettorTakesPot() public {
-        _dealHand(TWO_CLUBS, ACE_CLUBS); // bob has the better card
+    function test_SilentOpponent_MoneyStillComesOut() public {
+        _dealHand(_tripsVsPair());
 
         vm.prank(alice);
         table.act(Table.Action.Bet);
-        vm.prank(bob);
-        table.act(Table.Action.Fold); // folds the winner
 
-        assertEq(table.stack(alice), BUY_IN + ANTE);
-        assertEq(table.stack(bob), BUY_IN - ANTE);
-    }
-
-    function test_BetRaiseCall_RoundEndsOnlyAfterTheCall() public {
-        _dealHand(ACE_CLUBS, TWO_CLUBS);
+        // Bob closes his laptop and never returns.
+        vm.warp(block.timestamp + 365 days);
+        table.forceFold();
 
         vm.prank(alice);
-        table.act(Table.Action.Bet);
-        vm.prank(bob);
-        table.act(Table.Action.Bet); // a raise
-
-        // Both have acted, but bets are unequal — still live.
-        assertEq(uint256(table.phase()), 2, "still Betting");
-
-        vm.prank(alice);
-        table.act(Table.Action.Call);
-
-        assertEq(uint256(table.phase()), 0, "hand over");
-        assertEq(table.stack(alice), BUY_IN + ANTE + BET * 2);
-    }
-
-    function test_Tie_SplitsPot() public {
-        _dealHand(TWO_CLUBS, TWO_DIAMONDS); // same rank, different suit
-
-        vm.prank(alice);
-        table.act(Table.Action.Check);
-        vm.prank(bob);
-        table.act(Table.Action.Check);
-
-        assertEq(table.stack(alice), BUY_IN);
-        assertEq(table.stack(bob), BUY_IN);
-    }
-
-    function test_CannotCashOutMidHand() public {
-        _dealHand(ACE_CLUBS, TWO_CLUBS);
-        vm.prank(bob);
-        vm.expectRevert(Table.WrongPhase.selector);
         table.cashOut();
+
+        assertEq(chip.balanceOf(alice), 1_000e18 + ANTE);
+        assertEq(chip.balanceOf(address(table)), table.totalAccounted());
     }
 
-    function test_NotYourTurn() public {
-        _dealHand(ACE_CLUBS, TWO_CLUBS);
-        vm.prank(bob); // dealer seat 0 acts first
-        vm.expectRevert(Table.NotYourTurn.selector);
-        table.act(Table.Action.Check);
-    }
+    // ---------------------------------------------------------------
+    // The invariant, through whole random hands
+    // ---------------------------------------------------------------
 
     function testFuzz_SolventThroughRandomHands(uint256 entropy) public {
-        for (uint256 hand; hand < 6; ++hand) {
-            uint256 roll = uint256(keccak256(abi.encode(entropy, hand)));
+        for (uint256 h; h < 3; ++h) {
+            uint256 roll = uint256(keccak256(abi.encode(entropy, h)));
 
             try table.startHand() {}
             catch {
                 break;
             }
-            deck.setCards(uint8(roll % 52), uint8((roll >> 8) % 52));
+
+            uint8[9] memory nine;
+            for (uint256 i; i < 9; ++i) {
+                nine[i] = uint8(uint256(keccak256(abi.encode(roll, i))) % 52);
+            }
+            deck.setHand(nine);
             deck.fulfil();
             table.deal();
 
-            // Up to 8 random actions; invalid ones just revert.
-            for (uint256 step; step < 8; ++step) {
-                uint256 pick = uint256(keccak256(abi.encode(roll, step)));
+            for (uint256 step; step < 14; ++step) {
+                uint256 pick = uint256(keccak256(abi.encode(roll, step, uint256(7))));
                 address who = (pick % 2 == 0) ? alice : bob;
 
                 vm.prank(who);
@@ -184,24 +259,4 @@ contract TableTest is Test {
 
         assertEq(chip.balanceOf(address(table)), table.totalAccounted());
     }
-
-    function test_SilentOpponent_MoneyStillComesOut() public {
-        _dealHand(ACE_CLUBS, TWO_CLUBS);
-
-        vm.prank(alice);
-        table.act(Table.Action.Bet);
-
-        // Bob closes his laptop and never returns.
-        vm.warp(block.timestamp + 365 days);
-
-        table.forceFold();
-
-        vm.prank(alice);
-        table.cashOut();
-
-        // She started with 1000, bought in for 100, and won bob's ante.
-        assertEq(chip.balanceOf(alice), 1_000e18 + ANTE);
-        assertEq(chip.balanceOf(address(table)), table.totalAccounted());
-    }
 }
-

@@ -39,4 +39,11 @@ contract MockDeck is IDeckSource {
     function cardAt(uint256 index) external view returns (uint8) {
         return cards[index];
     }
+
+    // [0,1] = seat 0 hole, [2,3] = seat 1 hole, [4..8] = board
+    function setHand(uint8[9] calldata nine) external {
+        for (uint256 i; i < 9; ++i) {
+            cards[i] = nine[i];
+        }
+    }
 }

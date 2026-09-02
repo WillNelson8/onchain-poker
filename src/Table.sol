@@ -4,9 +4,11 @@ pragma solidity ^0.8.24;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IDeckSource} from "./IDeckSource.sol";
+import {HandEval} from "./HandEval.sol";
 
 /// @title Table
-/// @notice Heads-up, one face-up card each, one fixed-limit betting round.
+/// @notice Heads-up limit hold'em: two hole cards each, five community
+/// cards, four betting rounds. Cards are face up until Phase 7.
 contract Table {
     using SafeERC20 for IERC20;
 
@@ -43,11 +45,14 @@ contract Table {
     uint256 public pendingRequestId;
     uint256 public actor;
     uint256 public betsThisRound;
-
-    /// @dev One deadline serves both waiting states. Zero means "not waiting".
     uint256 public deadline;
 
-    uint8[SEAT_COUNT] public hole;
+    /// @dev 0 = preflop, 1 = flop, 2 = turn, 3 = river
+    uint8 public street;
+
+    uint8[2][SEAT_COUNT] public hole;
+    uint8[5] public board;
+
     uint256[SEAT_COUNT] public committed;
     bool[SEAT_COUNT] public folded;
     bool[SEAT_COUNT] public hasActed;
@@ -68,7 +73,8 @@ contract Table {
     event SatDown(address indexed player, uint256 seat, uint256 amount);
     event StoodUp(address indexed player, uint256 seat, uint256 amount);
     event HandStarted(uint256 indexed requestId, uint256 dealerSeat);
-    event Dealt(uint8 card0, uint8 card1);
+    event Dealt(uint8 a0, uint8 a1, uint8 b0, uint8 b1);
+    event StreetAdvanced(uint8 street);
     event Acted(uint256 indexed seat, Action action, uint256 committedNow);
     event HandEnded(uint256 toSeat0, uint256 toSeat1);
     event ForceFolded(uint256 indexed seat, address caller);
@@ -145,19 +151,21 @@ contract Table {
         emit HandStarted(pendingRequestId, dealerSeat);
     }
 
-    /// @notice Anyone may call this once the oracle has answered.
     function deal() external {
         if (phase != Phase.AwaitingDeck) revert WrongPhase();
         if (!deckSource.isReady(pendingRequestId)) revert DeckNotReady();
 
-        hole[0] = deckSource.cardAt(0);
-        hole[1] = deckSource.cardAt(1);
+        hole[0][0] = deckSource.cardAt(0);
+        hole[0][1] = deckSource.cardAt(1);
+        hole[1][0] = deckSource.cardAt(2);
+        hole[1][1] = deckSource.cardAt(3);
 
-        actor = dealerSeat;
+        street = 0;
+        actor = dealerSeat; // heads-up: button acts first preflop
         phase = Phase.Betting;
         deadline = block.timestamp + ACTION_TIMEOUT;
 
-        emit Dealt(hole[0], hole[1]);
+        emit Dealt(hole[0][0], hole[0][1], hole[1][0], hole[1][1]);
     }
 
     function act(Action action) external {
@@ -192,16 +200,13 @@ contract Table {
         emit Acted(seat, action, committed[seat]);
 
         if (hasActed[0] && hasActed[1] && committed[0] == committed[1]) {
-            _showdown();
+            _endBettingRound();
         } else {
             actor = opp;
             deadline = block.timestamp + ACTION_TIMEOUT;
         }
     }
 
-    /// @notice Fold the player who has run out the clock.
-    /// @dev Callable by ANYONE, so the table never depends on one address
-    /// being alive. The opponent is simply the one with a reason to call it.
     function forceFold() external {
         if (phase != Phase.Betting) revert WrongPhase();
         if (block.timestamp < deadline) revert DeadlineNotPassed();
@@ -216,8 +221,6 @@ contract Table {
         else _endHand(0, pot);
     }
 
-    /// @notice Unwind a hand whose deck never arrived. The pot here is
-    /// only antes, so refunding each commitment empties it exactly.
     function abortHand() external {
         if (phase != Phase.AwaitingDeck) revert WrongPhase();
         if (block.timestamp < deadline) revert DeadlineNotPassed();
@@ -229,13 +232,60 @@ contract Table {
         _endHand(refund0, refund1);
     }
 
-    function _showdown() internal {
-        uint8 rank0 = hole[0] % 13;
-        uint8 rank1 = hole[1] % 13;
+    // ---------------------------------------------------------------
+    // Streets and settlement
+    // ---------------------------------------------------------------
 
-        if (rank0 > rank1) {
+    function _endBettingRound() internal {
+        if (street == 3) {
+            _showdown();
+            return;
+        }
+
+        street += 1;
+        _revealBoard();
+
+        // `committed` tracks THIS street's bets, so it clears. The chips
+        // themselves are already in the pot and stay there.
+        delete committed;
+        delete hasActed;
+        betsThisRound = 0;
+
+        // Heads-up: the button acts first preflop and last on every
+        // street after it.
+        actor = SEAT_COUNT - 1 - dealerSeat;
+        deadline = block.timestamp + ACTION_TIMEOUT;
+
+        emit StreetAdvanced(street);
+    }
+
+    function _revealBoard() internal {
+        if (street == 1) {
+            board[0] = deckSource.cardAt(4);
+            board[1] = deckSource.cardAt(5);
+            board[2] = deckSource.cardAt(6);
+        } else if (street == 2) {
+            board[3] = deckSource.cardAt(7);
+        } else if (street == 3) {
+            board[4] = deckSource.cardAt(8);
+        }
+    }
+
+    function _sevenCards(uint256 seat) internal view returns (uint8[7] memory out) {
+        out[0] = hole[seat][0];
+        out[1] = hole[seat][1];
+        for (uint256 i; i < 5; ++i) {
+            out[2 + i] = board[i];
+        }
+    }
+
+    function _showdown() internal {
+        uint256 s0 = HandEval.score(_sevenCards(0));
+        uint256 s1 = HandEval.score(_sevenCards(1));
+
+        if (s0 > s1) {
             _endHand(pot, 0);
-        } else if (rank1 > rank0) {
+        } else if (s1 > s0) {
             _endHand(0, pot);
         } else {
             uint256 half = pot / 2;
@@ -253,10 +303,12 @@ contract Table {
         emit HandEnded(toSeat0, toSeat1);
 
         delete hole;
+        delete board;
         delete committed;
         delete folded;
         delete hasActed;
 
+        street = 0;
         betsThisRound = 0;
         actor = 0;
         pendingRequestId = 0;
@@ -265,7 +317,7 @@ contract Table {
         phase = Phase.Idle;
     }
 
-    /// @dev TODO Phase 5: no all-in. A player who cannot cover a call
+    /// @dev TODO Phase 6: no all-in. A player who cannot cover a call
     /// reverts here and has to fold instead.
     function _commit(uint256 seat, uint256 amount) internal {
         address player = seats[seat];
