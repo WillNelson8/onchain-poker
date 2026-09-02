@@ -75,5 +75,15 @@ contract ShufflerTest is Test {
             console.log(string.concat(ranks[card % 13], " of ", suits[card / 13]));
         }
     }
+
+    function test_StaleRequestCanBeSuperseded() public {
+        shuffler.requestShuffle();
+
+        vm.expectRevert(Shuffler.AlreadyAwaiting.selector);
+        shuffler.requestShuffle();
+
+        vm.warp(block.timestamp + 1 hours + 1);
+        shuffler.requestShuffle(); // no longer stuck
+    }
 }
 

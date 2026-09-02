@@ -12,6 +12,8 @@ contract Table {
 
     uint256 public constant SEAT_COUNT = 2;
     uint256 public constant MAX_BETS_PER_ROUND = 4;
+    uint256 public constant ACTION_TIMEOUT = 5 minutes;
+    uint256 public constant DECK_TIMEOUT = 1 hours;
 
     enum Phase {
         Idle,
@@ -42,6 +44,9 @@ contract Table {
     uint256 public actor;
     uint256 public betsThisRound;
 
+    /// @dev One deadline serves both waiting states. Zero means "not waiting".
+    uint256 public deadline;
+
     uint8[SEAT_COUNT] public hole;
     uint256[SEAT_COUNT] public committed;
     bool[SEAT_COUNT] public folded;
@@ -58,6 +63,7 @@ contract Table {
     error NothingToCall();
     error BettingCapped();
     error InsufficientStack();
+    error DeadlineNotPassed();
 
     event SatDown(address indexed player, uint256 seat, uint256 amount);
     event StoodUp(address indexed player, uint256 seat, uint256 amount);
@@ -65,6 +71,8 @@ contract Table {
     event Dealt(uint8 card0, uint8 card1);
     event Acted(uint256 indexed seat, Action action, uint256 committedNow);
     event HandEnded(uint256 toSeat0, uint256 toSeat1);
+    event ForceFolded(uint256 indexed seat, address caller);
+    event HandAborted(uint256 refund0, uint256 refund1);
 
     constructor(IERC20 chip_, IDeckSource deckSource_, uint256 buyInAmount_, uint256 ante_, uint256 betSize_) {
         chip = chip_;
@@ -73,10 +81,6 @@ contract Table {
         ante = ante_;
         betSize = betSize_;
     }
-
-    // ---------------------------------------------------------------
-    // Seats and money — Phase 1, now gated on Phase.Idle
-    // ---------------------------------------------------------------
 
     function seatOf(address player) public view returns (uint256 seat, bool seated) {
         for (uint256 i; i < SEAT_COUNT; ++i) {
@@ -106,8 +110,6 @@ contract Table {
         emit SatDown(msg.sender, seat, buyInAmount);
     }
 
-    // The Phase 1 TODO, now paid off. Without this line a losing
-    // player simply stands up and walks off with committed chips.
     function cashOut() external {
         if (phase != Phase.Idle) revert WrongPhase();
         (uint256 seat, bool seated) = seatOf(msg.sender);
@@ -128,10 +130,6 @@ contract Table {
         total += pot;
     }
 
-    // ---------------------------------------------------------------
-    // The hand
-    // ---------------------------------------------------------------
-
     function startHand() external {
         if (phase != Phase.Idle) revert WrongPhase();
         if (seats[0] == address(0) || seats[1] == address(0)) revert NeedTwoPlayers();
@@ -139,15 +137,15 @@ contract Table {
         _commit(0, ante);
         _commit(1, ante);
 
-        pendingRequestId = deckSource.requestShuffle();
         phase = Phase.AwaitingDeck;
+        deadline = block.timestamp + DECK_TIMEOUT;
+
+        pendingRequestId = deckSource.requestShuffle();
 
         emit HandStarted(pendingRequestId, dealerSeat);
     }
 
-    // Anyone may call this once the oracle has answered. Separating it
-    // from startHand is forced by the async gap — the deck does not
-    // exist in the transaction that asked for it.
+    /// @notice Anyone may call this once the oracle has answered.
     function deal() external {
         if (phase != Phase.AwaitingDeck) revert WrongPhase();
         if (!deckSource.isReady(pendingRequestId)) revert DeckNotReady();
@@ -157,6 +155,7 @@ contract Table {
 
         actor = dealerSeat;
         phase = Phase.Betting;
+        deadline = block.timestamp + ACTION_TIMEOUT;
 
         emit Dealt(hole[0], hole[1]);
     }
@@ -184,7 +183,6 @@ contract Table {
             if (toCall == 0) revert NothingToCall();
             _commit(seat, toCall);
         } else {
-            // Bet, or a raise if there is already something to call.
             if (betsThisRound >= MAX_BETS_PER_ROUND) revert BettingCapped();
             _commit(seat, toCall + betSize);
             betsThisRound += 1;
@@ -193,17 +191,43 @@ contract Table {
         hasActed[seat] = true;
         emit Acted(seat, action, committed[seat]);
 
-        // The rule from step 27, verbatim.
         if (hasActed[0] && hasActed[1] && committed[0] == committed[1]) {
             _showdown();
         } else {
             actor = opp;
+            deadline = block.timestamp + ACTION_TIMEOUT;
         }
     }
 
-    // ---------------------------------------------------------------
-    // Settlement
-    // ---------------------------------------------------------------
+    /// @notice Fold the player who has run out the clock.
+    /// @dev Callable by ANYONE, so the table never depends on one address
+    /// being alive. The opponent is simply the one with a reason to call it.
+    function forceFold() external {
+        if (phase != Phase.Betting) revert WrongPhase();
+        if (block.timestamp < deadline) revert DeadlineNotPassed();
+
+        uint256 delinquent = actor;
+        uint256 winner = SEAT_COUNT - 1 - delinquent;
+
+        folded[delinquent] = true;
+        emit ForceFolded(delinquent, msg.sender);
+
+        if (winner == 0) _endHand(pot, 0);
+        else _endHand(0, pot);
+    }
+
+    /// @notice Unwind a hand whose deck never arrived. The pot here is
+    /// only antes, so refunding each commitment empties it exactly.
+    function abortHand() external {
+        if (phase != Phase.AwaitingDeck) revert WrongPhase();
+        if (block.timestamp < deadline) revert DeadlineNotPassed();
+
+        uint256 refund0 = committed[0];
+        uint256 refund1 = committed[1];
+
+        emit HandAborted(refund0, refund1);
+        _endHand(refund0, refund1);
+    }
 
     function _showdown() internal {
         uint8 rank0 = hole[0] % 13;
@@ -214,9 +238,6 @@ contract Table {
         } else if (rank1 > rank0) {
             _endHand(0, pot);
         } else {
-            // Integer division loses the odd chip. If you drop it, the
-            // solvency invariant breaks by exactly 1 wei and the fuzz
-            // test finds it. Award it to the dealer, which alternates.
             uint256 half = pot / 2;
             uint256 odd = pot - (half * 2);
             if (dealerSeat == 0) _endHand(half + odd, half);
@@ -239,12 +260,13 @@ contract Table {
         betsThisRound = 0;
         actor = 0;
         pendingRequestId = 0;
+        deadline = 0;
         dealerSeat = SEAT_COUNT - 1 - dealerSeat;
         phase = Phase.Idle;
     }
 
-    // Chips leave a stack and enter the pot. Both sides of the
-    // invariant move together, so totalAccounted() never changes.
+    /// @dev TODO Phase 5: no all-in. A player who cannot cover a call
+    /// reverts here and has to fold instead.
     function _commit(uint256 seat, uint256 amount) internal {
         address player = seats[seat];
         if (stack[player] < amount) revert InsufficientStack();

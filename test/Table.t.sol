@@ -38,6 +38,41 @@ contract TableTest is Test {
         }
     }
 
+    function test_ForceFold_RevertsBeforeDeadline() public {
+        _dealHand(ACE_CLUBS, TWO_CLUBS);
+        vm.expectRevert(Table.DeadlineNotPassed.selector);
+        table.forceFold();
+    }
+
+    function test_ForceFold_AfterDeadline() public {
+        _dealHand(TWO_CLUBS, ACE_CLUBS); // alice to act, bob holds the ace
+
+        vm.warp(block.timestamp + 5 minutes + 1);
+        table.forceFold(); // note: no prank — anyone may call
+
+        assertEq(table.stack(bob), BUY_IN + ANTE);
+        assertEq(table.stack(alice), BUY_IN - ANTE);
+        assertEq(uint256(table.phase()), 0, "back to Idle");
+    }
+
+    function test_AbortHand_WhenDeckNeverArrives() public {
+        table.startHand();
+
+        vm.warp(block.timestamp + 1 hours + 1);
+        table.abortHand();
+
+        assertEq(table.stack(alice), BUY_IN, "ante refunded");
+        assertEq(table.stack(bob), BUY_IN, "ante refunded");
+        assertEq(table.pot(), 0);
+        assertEq(uint256(table.phase()), 0);
+    }
+
+    function test_AbortHand_RevertsBeforeDeadline() public {
+        table.startHand();
+        vm.expectRevert(Table.DeadlineNotPassed.selector);
+        table.abortHand();
+    }
+
     // alice is seat 0, bob is seat 1, dealer starts at seat 0.
     function _dealHand(uint8 card0, uint8 card1) internal {
         table.startHand();
@@ -147,6 +182,25 @@ contract TableTest is Test {
             }
         }
 
+        assertEq(chip.balanceOf(address(table)), table.totalAccounted());
+    }
+
+    function test_SilentOpponent_MoneyStillComesOut() public {
+        _dealHand(ACE_CLUBS, TWO_CLUBS);
+
+        vm.prank(alice);
+        table.act(Table.Action.Bet);
+
+        // Bob closes his laptop and never returns.
+        vm.warp(block.timestamp + 365 days);
+
+        table.forceFold();
+
+        vm.prank(alice);
+        table.cashOut();
+
+        // She started with 1000, bought in for 100, and won bob's ante.
+        assertEq(chip.balanceOf(alice), 1_000e18 + ANTE);
         assertEq(chip.balanceOf(address(table)), table.totalAccounted());
     }
 }

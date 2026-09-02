@@ -7,11 +7,9 @@ import {IDeckSource} from "./IDeckSource.sol";
 
 /// @title Shuffler
 /// @notice One random word in, one shuffled deck out. Knows no poker.
-contract Shuffler is
-    VRFConsumerBaseV2Plus,
-    IDeckSource // The async gap made explicit. Nothing else in this contract
-{
-    // matters as much as the fact that this enum has to exist.
+contract Shuffler is VRFConsumerBaseV2Plus, IDeckSource {
+    /// @dev The async gap made explicit. Nothing else in this contract
+    /// matters as much as the fact that this enum has to exist.
     enum Status {
         Idle,
         Awaiting,
@@ -24,13 +22,17 @@ contract Shuffler is
     uint32 public constant CALLBACK_GAS_LIMIT = 300_000;
     uint16 public constant REQUEST_CONFIRMATIONS = 3;
 
+    /// @dev After this long, an unanswered request can be superseded.
+    /// Without it, one oracle failure bricks the shuffler permanently.
+    uint256 public constant REQUEST_TIMEOUT = 1 hours;
+
     Status public status;
     uint256 public requestId;
+    uint256 public requestedAt;
     uint256 public seed;
     uint8[52] public deck;
 
     error AlreadyAwaiting();
-    error UnknownRequest();
 
     event ShuffleRequested(uint256 indexed requestId);
     event ShuffleReady(uint256 indexed requestId, uint256 seed);
@@ -41,8 +43,12 @@ contract Shuffler is
     }
 
     function requestShuffle() external returns (uint256) {
-        if (status == Status.Awaiting) revert AlreadyAwaiting();
+        if (status == Status.Awaiting && block.timestamp < requestedAt + REQUEST_TIMEOUT) {
+            revert AlreadyAwaiting();
+        }
+
         status = Status.Awaiting;
+        requestedAt = block.timestamp;
 
         requestId = s_vrfCoordinator.requestRandomWords(
             VRFV2PlusClient.RandomWordsRequest({
@@ -59,12 +65,13 @@ contract Shuffler is
         return requestId;
     }
 
-    // Chainlink calls this. Not you, not a player — the coordinator,
-    // in its own transaction, minutes later. It is `internal`, so
-    // nothing outside can fake it, and the base contract checks the
-    // caller before it ever reaches here.
+    /// @dev Chainlink calls this, in its own transaction, minutes later.
     function fulfillRandomWords(uint256 requestId_, uint256[] calldata randomWords) internal override {
-        if (requestId_ != requestId) revert UnknownRequest();
+        // Never revert in a VRF callback. The coordinator has already paid
+        // for and proved this randomness; reverting burns it and gains
+        // nothing. A late answer to a superseded request is simply not
+        // interesting, so ignore it and return cleanly.
+        if (requestId_ != requestId) return;
 
         seed = randomWords[0];
         _shuffle(seed);
@@ -73,8 +80,8 @@ contract Shuffler is
         emit ShuffleReady(requestId_, seed);
     }
 
-    // Fisher-Yates. Walk down the deck, swap each card with a random
-    // earlier one. Every permutation equally likely, given a fair seed.
+    /// @dev Fisher-Yates. Walk down the deck, swap each card with a random
+    /// earlier one. Every permutation equally likely, given a fair seed.
     function _shuffle(uint256 seed_) internal {
         for (uint8 i; i < 52; ++i) {
             deck[i] = i;
@@ -89,6 +96,13 @@ contract Shuffler is
         return deck;
     }
 
+    // ---------------------------------------------------------------
+    // IDeckSource
+    // ---------------------------------------------------------------
+
+    /// @dev Takes the request id rather than just reporting "ready",
+    /// because this contract outlives any single hand. A table that only
+    /// asked "are you ready?" would happily deal last hand's deck.
     function isReady(uint256 requestId_) external view returns (bool) {
         return status == Status.Ready && requestId_ == requestId;
     }
